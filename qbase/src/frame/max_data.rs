@@ -16,8 +16,6 @@ pub struct MaxDataFrame {
     max_data: VarInt,
 }
 
-const MAX_DATA_FRAME_TYPE: u8 = 0x10;
-
 impl super::GetFrameType for MaxDataFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::MaxData
@@ -55,14 +53,14 @@ pub fn be_max_data_frame(input: &[u8]) -> nom::IResult<&[u8], MaxDataFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<MaxDataFrame> for T {
     fn put_frame(&mut self, frame: &MaxDataFrame) {
-        self.put_u8(MAX_DATA_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_varint(&frame.max_data);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_DATA_FRAME_TYPE, MaxDataFrame};
+    use super::MaxDataFrame;
     use crate::{
         frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
         varint::VarInt,
@@ -82,9 +80,10 @@ mod tests {
 
         use super::be_max_data_frame;
         use crate::varint::be_varint;
-        let buf = vec![MAX_DATA_FRAME_TYPE, 0x52, 0x34];
+        let max_data_frame_type = VarInt::from(FrameType::MaxData);
+        let buf = vec![max_data_frame_type.into_inner() as u8, 0x52, 0x34];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == MAX_DATA_FRAME_TYPE as u64 {
+            if frame_type == max_data_frame_type {
                 be_max_data_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -100,6 +99,13 @@ mod tests {
     fn test_write_max_data_frame() {
         let mut buf = Vec::new();
         buf.put_frame(&MaxDataFrame::new(VarInt::from_u32(0x1234)));
-        assert_eq!(buf, vec![MAX_DATA_FRAME_TYPE, 0x52, 0x34]);
+        assert_eq!(
+            buf,
+            vec![
+                VarInt::from(FrameType::MaxData).into_inner() as u8,
+                0x52,
+                0x34
+            ]
+        );
     }
 }

@@ -21,8 +21,6 @@ pub struct StopSendingFrame {
     app_err_code: VarInt,
 }
 
-const STOP_SENDING_FRAME_TYPE: u8 = 0x05;
-
 impl StopSendingFrame {
     /// Create a new [`StopSendingFrame`].
     pub fn new(stream_id: StreamId, app_err_code: VarInt) -> Self {
@@ -79,7 +77,7 @@ pub fn be_stop_sending_frame(input: &[u8]) -> nom::IResult<&[u8], StopSendingFra
 
 impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {
     fn put_frame(&mut self, frame: &StopSendingFrame) {
-        self.put_u8(STOP_SENDING_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_streamid(&frame.stream_id);
         self.put_varint(&frame.app_err_code);
     }
@@ -87,7 +85,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {
 
 #[cfg(test)]
 mod tests {
-    use super::{STOP_SENDING_FRAME_TYPE, StopSendingFrame, be_stop_sending_frame};
+    use super::{StopSendingFrame, be_stop_sending_frame};
     use crate::{
         frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
         varint::{VarInt, be_varint},
@@ -112,8 +110,9 @@ mod tests {
             StopSendingFrame::new(VarInt::from_u32(0x1234).into(), VarInt::from_u32(0x5678));
         let mut buf = Vec::new();
         buf.put_frame(&frame);
+        let stop_sending_frame_type = VarInt::from(FrameType::StopSending);
         let (input, parsed) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == STOP_SENDING_FRAME_TYPE as u64 {
+            if frame_type == stop_sending_frame_type {
                 be_stop_sending_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -135,7 +134,15 @@ mod tests {
         buf.put_frame(&frame);
         assert_eq!(
             buf,
-            vec![STOP_SENDING_FRAME_TYPE, 0x52, 0x34, 0x80, 0, 0x56, 0x78]
+            vec![
+                VarInt::from(FrameType::StopSending).into_inner() as u8,
+                0x52,
+                0x34,
+                0x80,
+                0,
+                0x56,
+                0x78
+            ]
         );
     }
 }

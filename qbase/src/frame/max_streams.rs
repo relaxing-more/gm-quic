@@ -20,8 +20,6 @@ pub enum MaxStreamsFrame {
     Uni(VarInt),
 }
 
-const MAX_STREAMS_FRAME_TYPE: u8 = 0x12;
-
 impl MaxStreamsFrame {
     pub fn with(dir: Dir, max_streams: VarInt) -> Self {
         match dir {
@@ -81,11 +79,11 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamsFrame> for T {
     fn put_frame(&mut self, frame: &MaxStreamsFrame) {
         match frame {
             MaxStreamsFrame::Bi(max_streams) => {
-                self.put_u8(MAX_STREAMS_FRAME_TYPE);
+                self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
                 self.put_varint(max_streams);
             }
             MaxStreamsFrame::Uni(max_streams) => {
-                self.put_u8(MAX_STREAMS_FRAME_TYPE | 0x1);
+                self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
                 self.put_varint(max_streams);
             }
         }
@@ -95,7 +93,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamsFrame> for T {
 mod tests {
     use nom::{Parser, combinator::flat_map};
 
-    use super::{MAX_STREAMS_FRAME_TYPE, MaxStreamsFrame, max_streams_frame_with_dir};
+    use super::{MaxStreamsFrame, max_streams_frame_with_dir};
     use crate::{
         frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
         sid::Dir,
@@ -117,9 +115,11 @@ mod tests {
 
     #[test]
     fn test_read_max_streams_frame() {
-        let buf = vec![MAX_STREAMS_FRAME_TYPE, 0x52, 0x34];
+        let max_streams_bi_type = VarInt::from(FrameType::MaxStreams(Dir::Bi));
+        let max_streams_uni_type = VarInt::from(FrameType::MaxStreams(Dir::Uni));
+        let buf = vec![max_streams_bi_type.into_inner() as u8, 0x52, 0x34];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == MAX_STREAMS_FRAME_TYPE as u64 {
+            if frame_type == max_streams_bi_type {
                 max_streams_frame_with_dir(Dir::Bi)
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -130,9 +130,9 @@ mod tests {
         assert!(input.is_empty());
         assert_eq!(frame, MaxStreamsFrame::Bi(VarInt::from_u32(0x1234)));
 
-        let buf = vec![MAX_STREAMS_FRAME_TYPE | 0x1, 0x52, 0x36];
+        let buf = vec![max_streams_uni_type.into_inner() as u8, 0x52, 0x36];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == (MAX_STREAMS_FRAME_TYPE | 0x1) as u64 {
+            if frame_type == max_streams_uni_type {
                 max_streams_frame_with_dir(Dir::Uni)
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_read_too_large_max_streams_frame() {
         let buf = vec![
-            MAX_STREAMS_FRAME_TYPE,
+            VarInt::from(FrameType::MaxStreams(Dir::Bi)).into_inner() as u8,
             0xd0,
             0x34,
             0x80,
@@ -158,7 +158,7 @@ mod tests {
             0x80,
         ];
         let result = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == MAX_STREAMS_FRAME_TYPE as u64 {
+            if frame_type == VarInt::from(FrameType::MaxStreams(Dir::Bi)) {
                 max_streams_frame_with_dir(Dir::Bi)
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -178,9 +178,23 @@ mod tests {
     fn test_write_max_streams_frame() {
         let mut buf = Vec::new();
         buf.put_frame(&MaxStreamsFrame::Bi(VarInt::from_u32(0x1234)));
-        assert_eq!(buf, vec![MAX_STREAMS_FRAME_TYPE, 0x52, 0x34]);
+        assert_eq!(
+            buf,
+            vec![
+                VarInt::from(FrameType::MaxStreams(Dir::Bi)).into_inner() as u8,
+                0x52,
+                0x34
+            ]
+        );
         buf.clear();
         buf.put_frame(&MaxStreamsFrame::Uni(VarInt::from_u32(0x1236)));
-        assert_eq!(buf, vec![0x13, 0x52, 0x36]);
+        assert_eq!(
+            buf,
+            vec![
+                VarInt::from(FrameType::MaxStreams(Dir::Uni)).into_inner() as u8,
+                0x52,
+                0x36
+            ]
+        );
     }
 }

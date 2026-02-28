@@ -26,8 +26,6 @@ pub struct CryptoFrame {
     length: VarInt,
 }
 
-const CRYPTO_FRAME_TYPE: u8 = 0x06;
-
 impl super::GetFrameType for CryptoFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::Crypto
@@ -120,7 +118,7 @@ where
 {
     fn put_data_frame(&mut self, frame: &CryptoFrame, data: &D) {
         assert_eq!(frame.length.into_inner(), data.len() as u64);
-        self.put_u8(CRYPTO_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_varint(&frame.offset);
         self.put_varint(&frame.length);
         self.put_data(data);
@@ -129,9 +127,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CRYPTO_FRAME_TYPE, CryptoFrame};
+    use super::CryptoFrame;
     use crate::{
-        frame::{EncodeSize, GetFrameType, io::WriteDataFrame},
+        frame::{EncodeSize, FrameType, GetFrameType, io::WriteDataFrame},
         varint::VarInt,
     };
 
@@ -165,8 +163,8 @@ mod tests {
         buf.put_data_frame(&frame, b"hello");
         assert_eq!(
             buf,
-            bytes::Bytes::from_static(&[
-                CRYPTO_FRAME_TYPE,
+            bytes::Bytes::from(vec![
+                VarInt::from(FrameType::Crypto).into_inner() as u8,
                 0x52,
                 0x34,
                 0x05,

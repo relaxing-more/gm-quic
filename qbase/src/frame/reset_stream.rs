@@ -25,8 +25,6 @@ pub struct ResetStreamFrame {
     final_size: VarInt,
 }
 
-const RESET_STREAM_FRAME_TYPE: u8 = 0x04;
-
 impl super::GetFrameType for ResetStreamFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::ResetStream
@@ -88,7 +86,7 @@ pub fn be_reset_stream_frame(input: &[u8]) -> nom::IResult<&[u8], ResetStreamFra
 
 impl<T: bytes::BufMut> super::io::WriteFrame<ResetStreamFrame> for T {
     fn put_frame(&mut self, frame: &ResetStreamFrame) {
-        self.put_u8(RESET_STREAM_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_streamid(&frame.stream_id);
         self.put_varint(&frame.app_error_code);
         self.put_varint(&frame.final_size);
@@ -136,7 +134,7 @@ impl From<&ResetStreamFrame> for ResetStreamError {
 mod tests {
     use nom::{Parser, combinator::flat_map};
 
-    use super::{RESET_STREAM_FRAME_TYPE, ResetStreamError, ResetStreamFrame};
+    use super::{ResetStreamError, ResetStreamFrame};
     use crate::{
         frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
         varint::{VarInt, be_varint},
@@ -166,7 +164,7 @@ mod tests {
     #[test]
     fn test_read_reset_stream_frame() {
         let buf = vec![
-            RESET_STREAM_FRAME_TYPE,
+            VarInt::from(FrameType::ResetStream).into_inner() as u8,
             0x52,
             0x34,
             0x80,
@@ -179,7 +177,7 @@ mod tests {
             0xbc,
         ];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == RESET_STREAM_FRAME_TYPE as u64 {
+            if frame_type == VarInt::from(FrameType::ResetStream) {
                 super::be_reset_stream_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -211,7 +209,7 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                RESET_STREAM_FRAME_TYPE,
+                VarInt::from(FrameType::ResetStream).into_inner() as u8,
                 0x52,
                 0x34,
                 0x80,

@@ -16,8 +16,6 @@ pub struct RetireConnectionIdFrame {
     sequence: VarInt,
 }
 
-const RETIRE_CONNECTION_ID_FRAME_TYPE: u8 = 0x19;
-
 impl super::GetFrameType for RetireConnectionIdFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::RetireConnectionId
@@ -55,7 +53,7 @@ pub fn be_retire_connection_id_frame(input: &[u8]) -> nom::IResult<&[u8], Retire
 
 impl<T: bytes::BufMut> super::io::WriteFrame<RetireConnectionIdFrame> for T {
     fn put_frame(&mut self, frame: &RetireConnectionIdFrame) {
-        self.put_u8(RETIRE_CONNECTION_ID_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_varint(&frame.sequence);
     }
 }
@@ -93,6 +91,13 @@ mod tests {
         let mut buf = Vec::new();
         let frame = RetireConnectionIdFrame::new(VarInt::from_u32(0x1234));
         buf.put_frame(&frame);
-        assert_eq!(buf, vec![0x19, 0x52, 0x34]);
+        assert_eq!(
+            buf,
+            vec![
+                VarInt::from(FrameType::RetireConnectionId).into_inner() as u8,
+                0x52,
+                0x34
+            ]
+        );
     }
 }

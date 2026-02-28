@@ -21,8 +21,6 @@ pub struct MaxStreamDataFrame {
     max_stream_data: VarInt,
 }
 
-const MAX_STREAM_DATA_FRAME_TYPE: u8 = 0x11;
-
 impl MaxStreamDataFrame {
     /// Create a new [`MaxStreamDataFrame`].
     pub fn new(stream_id: StreamId, max_stream_data: VarInt) -> Self {
@@ -75,7 +73,7 @@ pub fn be_max_stream_data_frame(input: &[u8]) -> nom::IResult<&[u8], MaxStreamDa
 
 impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamDataFrame> for T {
     fn put_frame(&mut self, frame: &MaxStreamDataFrame) {
-        self.put_u8(MAX_STREAM_DATA_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_streamid(&frame.stream_id);
         self.put_varint(&frame.max_stream_data);
     }
@@ -83,7 +81,7 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamDataFrame> for T {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_STREAM_DATA_FRAME_TYPE, MaxStreamDataFrame};
+    use super::MaxStreamDataFrame;
     use crate::{
         frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
         varint::VarInt,
@@ -118,7 +116,15 @@ mod tests {
         ));
         assert_eq!(
             buf,
-            vec![MAX_STREAM_DATA_FRAME_TYPE, 0x52, 0x34, 0x80, 0, 0x56, 0x78]
+            vec![
+                VarInt::from(FrameType::MaxStreamData).into_inner() as u8,
+                0x52,
+                0x34,
+                0x80,
+                0,
+                0x56,
+                0x78
+            ]
         );
     }
 }

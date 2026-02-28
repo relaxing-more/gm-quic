@@ -123,9 +123,6 @@ pub enum ConnectionCloseFrame {
     Quic(QuicCloseFrame),
 }
 
-// TODO: 删除 frame type 常量
-const CONNECTION_CLOSE_FRAME_TYPE: u8 = 0x1c;
-
 impl super::GetFrameType for ConnectionCloseFrame {
     fn frame_type(&self) -> FrameType {
         match self {
@@ -239,18 +236,17 @@ pub fn connection_close_frame_at_layer(
 
 impl<T: bytes::BufMut> super::io::WriteFrame<ConnectionCloseFrame> for T {
     fn put_frame(&mut self, frame: &ConnectionCloseFrame) {
+        use crate::varint::WriteVarInt;
         match frame {
             ConnectionCloseFrame::App(frame) => {
-                use crate::varint::WriteVarInt;
-                self.put_u8(CONNECTION_CLOSE_FRAME_TYPE | u8::from(Layer::App));
+                self.put_varint(&VarInt::from(FrameType::ConnectionClose(Layer::App)));
                 self.put_varint(&frame.error_code);
                 let len = frame.reason.len().min(self.remaining_mut());
                 self.put_varint(&VarInt::from_u32(len as u32));
                 self.put_slice(&frame.reason.as_bytes()[..len]);
             }
             ConnectionCloseFrame::Quic(frame) => {
-                use crate::varint::WriteVarInt;
-                self.put_u8(CONNECTION_CLOSE_FRAME_TYPE | u8::from(Layer::Quic));
+                self.put_varint(&VarInt::from(FrameType::ConnectionClose(Layer::Quic)));
                 self.put_varint(&frame.error_kind.into());
                 self.put_varint(&frame.frame_type.into());
                 let len = frame.reason.len().min(self.remaining_mut());
@@ -287,8 +283,9 @@ mod tests {
         use nom::{Parser, combinator::flat_map};
 
         use crate::varint::be_varint;
+        let app_close_frame_type = VarInt::from(FrameType::ConnectionClose(Layer::App));
         let buf = vec![
-            CONNECTION_CLOSE_FRAME_TYPE | u8::from(Layer::App),
+            app_close_frame_type.into_inner() as u8,
             0x0c,
             5,
             b'w',
@@ -298,9 +295,7 @@ mod tests {
             b'g',
         ];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner()
-                == (CONNECTION_CLOSE_FRAME_TYPE | u8::from(Layer::App)) as u64
-            {
+            if frame_type == app_close_frame_type {
                 connection_close_frame_at_layer(Layer::App)
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -328,7 +323,7 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                CONNECTION_CLOSE_FRAME_TYPE | u8::from(Layer::Quic),
+                VarInt::from(FrameType::ConnectionClose(Layer::Quic)).into_inner() as u8,
                 0x03,
                 0xe,
                 5,

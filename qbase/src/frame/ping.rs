@@ -11,8 +11,6 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PingFrame;
 
-const PING_FRAME_TYPE: u8 = 0x01;
-
 impl super::GetFrameType for PingFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::Ping
@@ -29,14 +27,20 @@ pub fn be_ping_frame(input: &[u8]) -> nom::IResult<&[u8], PingFrame> {
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<PingFrame> for T {
-    fn put_frame(&mut self, _: &PingFrame) {
-        self.put_u8(PING_FRAME_TYPE);
+    fn put_frame(&mut self, frame: &PingFrame) {
+        use crate::varint::WriteVarInt;
+        self.put_varint(&crate::varint::VarInt::from(
+            super::GetFrameType::frame_type(frame),
+        ));
     }
 }
 #[cfg(test)]
 mod tests {
-    use super::{PING_FRAME_TYPE, PingFrame};
-    use crate::frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame};
+    use super::PingFrame;
+    use crate::{
+        frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
+        varint::VarInt,
+    };
 
     #[test]
     fn test_ping_frame() {
@@ -51,9 +55,10 @@ mod tests {
 
         use super::be_ping_frame;
         use crate::varint::be_varint;
-        let buf = vec![PING_FRAME_TYPE];
+        let ping_frame_type = VarInt::from(FrameType::Ping);
+        let buf = vec![ping_frame_type.into_inner() as u8];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == PING_FRAME_TYPE as u64 {
+            if frame_type == ping_frame_type {
                 be_ping_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -69,6 +74,6 @@ mod tests {
     fn test_write_ping_frame() {
         let mut buf = Vec::new();
         buf.put_frame(&PingFrame);
-        assert_eq!(buf, vec![PING_FRAME_TYPE]);
+        assert_eq!(buf, vec![VarInt::from(FrameType::Ping).into_inner() as u8]);
     }
 }

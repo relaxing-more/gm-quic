@@ -33,8 +33,6 @@ impl PathChallengeFrame {
     }
 }
 
-const PATH_CHALLENGE_FRAME_TYPE: u8 = 0x1a;
-
 impl super::GetFrameType for PathChallengeFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::PathChallenge
@@ -61,7 +59,10 @@ pub fn be_path_challenge_frame(input: &[u8]) -> nom::IResult<&[u8], PathChalleng
 // BufMut write extension for PATH_CHALLENGE_FRAME
 impl<T: bytes::BufMut> super::io::WriteFrame<PathChallengeFrame> for T {
     fn put_frame(&mut self, frame: &PathChallengeFrame) {
-        self.put_u8(PATH_CHALLENGE_FRAME_TYPE);
+        use crate::varint::WriteVarInt;
+        self.put_varint(&crate::varint::VarInt::from(
+            super::GetFrameType::frame_type(frame),
+        ));
         self.put_slice(&frame.data);
     }
 }
@@ -86,9 +87,10 @@ mod tests {
         use nom::{Parser, combinator::flat_map};
 
         use super::be_path_challenge_frame;
-        use crate::varint::be_varint;
+        use crate::{frame::FrameType, varint::be_varint};
+        let path_challenge_frame_type = crate::varint::VarInt::from(FrameType::PathChallenge);
         let buf = vec![
-            super::PATH_CHALLENGE_FRAME_TYPE,
+            path_challenge_frame_type.into_inner() as u8,
             0x01,
             0x02,
             0x03,
@@ -99,7 +101,7 @@ mod tests {
             0x08,
         ];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == super::PATH_CHALLENGE_FRAME_TYPE as u64 {
+            if frame_type == path_challenge_frame_type {
                 be_path_challenge_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -118,7 +120,7 @@ mod tests {
 
     #[test]
     fn test_write_path_challenge_frame() {
-        use crate::frame::io::WriteFrame;
+        use crate::{frame::io::WriteFrame, varint::VarInt};
         let mut buf = Vec::new();
         let frame = super::PathChallengeFrame::from_slice(&[
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
@@ -127,7 +129,7 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                super::PATH_CHALLENGE_FRAME_TYPE,
+                VarInt::from(super::super::FrameType::PathChallenge).into_inner() as u8,
                 0x01,
                 0x02,
                 0x03,

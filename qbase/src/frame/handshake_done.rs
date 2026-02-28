@@ -13,8 +13,6 @@ use super::EncodeSize;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HandshakeDoneFrame;
 
-const HANDSHAKE_DONE_FRAME_TYPE: u8 = 0x1e;
-
 impl super::GetFrameType for HandshakeDoneFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::HandshakeDone
@@ -31,14 +29,20 @@ pub fn be_handshake_done_frame(input: &[u8]) -> nom::IResult<&[u8], HandshakeDon
 }
 
 impl<T: bytes::BufMut> super::io::WriteFrame<HandshakeDoneFrame> for T {
-    fn put_frame(&mut self, _: &HandshakeDoneFrame) {
-        self.put_u8(HANDSHAKE_DONE_FRAME_TYPE);
+    fn put_frame(&mut self, frame: &HandshakeDoneFrame) {
+        use crate::varint::WriteVarInt;
+        self.put_varint(&crate::varint::VarInt::from(
+            super::GetFrameType::frame_type(frame),
+        ));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::frame::{EncodeSize, FrameType, GetFrameType, HandshakeDoneFrame, io::WriteFrame};
+    use crate::{
+        frame::{EncodeSize, FrameType, GetFrameType, HandshakeDoneFrame, io::WriteFrame},
+        varint::VarInt,
+    };
 
     #[test]
     fn test_handshake_done_frame() {
@@ -53,9 +57,10 @@ mod tests {
 
         use super::be_handshake_done_frame;
         use crate::varint::be_varint;
-        let buf = vec![super::HANDSHAKE_DONE_FRAME_TYPE];
+        let handshake_done_frame_type = VarInt::from(FrameType::HandshakeDone);
+        let buf = vec![handshake_done_frame_type.into_inner() as u8];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == super::HANDSHAKE_DONE_FRAME_TYPE as u64 {
+            if frame_type == handshake_done_frame_type {
                 be_handshake_done_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -71,6 +76,9 @@ mod tests {
     fn test_write_handshake_done_frame() {
         let mut buf = Vec::new();
         buf.put_frame(&HandshakeDoneFrame);
-        assert_eq!(buf, vec![super::HANDSHAKE_DONE_FRAME_TYPE]);
+        assert_eq!(
+            buf,
+            vec![VarInt::from(FrameType::HandshakeDone).into_inner() as u8]
+        );
     }
 }

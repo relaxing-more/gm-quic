@@ -34,8 +34,6 @@ impl From<super::PathChallengeFrame> for PathResponseFrame {
     }
 }
 
-const PATH_RESPONSE_FRAME_TYPE: u8 = 0x1b;
-
 impl super::GetFrameType for PathResponseFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::PathResponse
@@ -61,7 +59,10 @@ pub fn be_path_response_frame(input: &[u8]) -> nom::IResult<&[u8], PathResponseF
 
 impl<T: bytes::BufMut> super::io::WriteFrame<PathResponseFrame> for T {
     fn put_frame(&mut self, frame: &PathResponseFrame) {
-        self.put_u8(PATH_RESPONSE_FRAME_TYPE);
+        use crate::varint::WriteVarInt;
+        self.put_varint(&crate::varint::VarInt::from(
+            super::GetFrameType::frame_type(frame),
+        ));
         self.put_slice(&frame.data);
     }
 }
@@ -84,9 +85,10 @@ mod tests {
     fn test_read_path_response_frame() {
         use nom::{Parser, combinator::flat_map};
 
-        use crate::varint::be_varint;
+        use crate::{frame::FrameType, varint::be_varint};
+        let path_response_frame_type = crate::varint::VarInt::from(FrameType::PathResponse);
         let buf = vec![
-            super::PATH_RESPONSE_FRAME_TYPE,
+            path_response_frame_type.into_inner() as u8,
             0x01,
             0x02,
             0x03,
@@ -97,7 +99,7 @@ mod tests {
             0x08,
         ];
         let (input, frame) = flat_map(be_varint, |frame_type| {
-            if frame_type.into_inner() == super::PATH_RESPONSE_FRAME_TYPE as u64 {
+            if frame_type == path_response_frame_type {
                 be_path_response_frame
             } else {
                 panic!("wrong frame type: {frame_type}")
@@ -114,6 +116,7 @@ mod tests {
 
     #[test]
     fn test_write_path_response_frame() {
+        use crate::varint::VarInt;
         let mut buf = Vec::<u8>::new();
         let frame =
             PathResponseFrame::from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
@@ -121,7 +124,7 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                super::PATH_RESPONSE_FRAME_TYPE,
+                VarInt::from(super::super::FrameType::PathResponse).into_inner() as u8,
                 0x01,
                 0x02,
                 0x03,

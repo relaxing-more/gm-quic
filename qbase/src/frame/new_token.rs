@@ -20,8 +20,6 @@ pub struct NewTokenFrame {
     token: Vec<u8>,
 }
 
-const NEW_TOKEN_FRAME_TYPE: u8 = 0x07;
-
 impl super::GetFrameType for NewTokenFrame {
     fn frame_type(&self) -> super::FrameType {
         super::FrameType::NewToken
@@ -77,14 +75,17 @@ pub fn be_new_token_frame(input: &[u8]) -> nom::IResult<&[u8], NewTokenFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<NewTokenFrame> for T {
     fn put_frame(&mut self, frame: &NewTokenFrame) {
-        self.put_u8(NEW_TOKEN_FRAME_TYPE);
+        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
         self.put_varint(&VarInt::from_u32(frame.token.len() as u32));
         self.put_slice(&frame.token);
     }
 }
 #[cfg(test)]
 mod tests {
-    use crate::frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame};
+    use crate::{
+        frame::{EncodeSize, FrameType, GetFrameType, io::WriteFrame},
+        varint::VarInt,
+    };
 
     #[test]
     fn test_new_token_frame() {
@@ -108,6 +109,14 @@ mod tests {
         let mut buf = Vec::<u8>::new();
         let frame = super::NewTokenFrame::from_slice(&[0x01, 0x02]);
         buf.put_frame(&frame);
-        assert_eq!(buf, vec![0x07, 0x02, 0x01, 0x02]);
+        assert_eq!(
+            buf,
+            vec![
+                VarInt::from(FrameType::NewToken).into_inner() as u8,
+                0x02,
+                0x01,
+                0x02
+            ]
+        );
     }
 }
