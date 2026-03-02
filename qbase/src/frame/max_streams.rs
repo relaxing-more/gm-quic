@@ -1,4 +1,5 @@
 use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
     sid::{Dir, MAX_STREAMS_LIMIT},
     varint::{VarInt, WriteVarInt, be_varint},
 };
@@ -79,11 +80,12 @@ impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamsFrame> for T {
     fn put_frame(&mut self, frame: &MaxStreamsFrame) {
         match frame {
             MaxStreamsFrame::Bi(max_streams) => {
-                self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+                // self.put_frame_type(frame.frame_type());
+                self.put_frame_type(frame.frame_type());
                 self.put_varint(max_streams);
             }
             MaxStreamsFrame::Uni(max_streams) => {
-                self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+                self.put_frame_type(frame.frame_type());
                 self.put_varint(max_streams);
             }
         }

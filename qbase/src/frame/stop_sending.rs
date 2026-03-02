@@ -1,4 +1,5 @@
 use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
     sid::{StreamId, WriteStreamId, be_streamid},
     varint::{VarInt, WriteVarInt, be_varint},
 };
@@ -77,7 +78,7 @@ pub fn be_stop_sending_frame(input: &[u8]) -> nom::IResult<&[u8], StopSendingFra
 
 impl<T: bytes::BufMut> super::io::WriteFrame<StopSendingFrame> for T {
     fn put_frame(&mut self, frame: &StopSendingFrame) {
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_streamid(&frame.stream_id);
         self.put_varint(&frame.app_err_code);
     }

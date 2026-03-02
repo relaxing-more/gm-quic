@@ -6,7 +6,7 @@ use nom::bytes::complete::take;
 use super::FrameType;
 use crate::{
     error::{ErrorFrameType, ErrorKind},
-    frame::be_frame_type,
+    frame::{GetFrameType, be_frame_type, io::WriteFrameType},
     varint::{VarInt, be_varint},
 };
 
@@ -237,16 +237,15 @@ pub fn connection_close_frame_at_layer(
 impl<T: bytes::BufMut> super::io::WriteFrame<ConnectionCloseFrame> for T {
     fn put_frame(&mut self, frame: &ConnectionCloseFrame) {
         use crate::varint::WriteVarInt;
+        self.put_frame_type(frame.frame_type());
         match frame {
             ConnectionCloseFrame::App(frame) => {
-                self.put_varint(&VarInt::from(FrameType::ConnectionClose(Layer::App)));
                 self.put_varint(&frame.error_code);
                 let len = frame.reason.len().min(self.remaining_mut());
                 self.put_varint(&VarInt::from_u32(len as u32));
                 self.put_slice(&frame.reason.as_bytes()[..len]);
             }
             ConnectionCloseFrame::Quic(frame) => {
-                self.put_varint(&VarInt::from(FrameType::ConnectionClose(Layer::Quic)));
                 self.put_varint(&frame.error_kind.into());
                 self.put_varint(&frame.frame_type.into());
                 let len = frame.reason.len().min(self.remaining_mut());

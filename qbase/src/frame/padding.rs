@@ -1,3 +1,4 @@
+use crate::frame::{GetFrameType, io::WriteFrameType};
 /// PADDING Frame.
 ///
 /// ```text
@@ -28,10 +29,7 @@ pub fn be_padding_frame(input: &[u8]) -> nom::IResult<&[u8], PaddingFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<PaddingFrame> for T {
     fn put_frame(&mut self, frame: &PaddingFrame) {
-        use crate::varint::WriteVarInt;
-        self.put_varint(&crate::varint::VarInt::from(
-            super::GetFrameType::frame_type(frame),
-        ));
+        self.put_frame_type(frame.frame_type());
     }
 }
 

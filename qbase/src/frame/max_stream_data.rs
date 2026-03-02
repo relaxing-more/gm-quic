@@ -1,4 +1,5 @@
 use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
     sid::{StreamId, WriteStreamId, be_streamid},
     varint::{VarInt, WriteVarInt, be_varint},
 };
@@ -73,7 +74,7 @@ pub fn be_max_stream_data_frame(input: &[u8]) -> nom::IResult<&[u8], MaxStreamDa
 
 impl<T: bytes::BufMut> super::io::WriteFrame<MaxStreamDataFrame> for T {
     fn put_frame(&mut self, frame: &MaxStreamDataFrame) {
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_streamid(&frame.stream_id);
         self.put_varint(&frame.max_stream_data);
     }

@@ -1,7 +1,9 @@
 use derive_more::Deref;
 
-use crate::varint::{VarInt, WriteVarInt, be_varint};
-
+use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
+    varint::{VarInt, WriteVarInt, be_varint},
+};
 /// NEW_TOKEN frame.
 ///
 /// ```text
@@ -75,7 +77,7 @@ pub fn be_new_token_frame(input: &[u8]) -> nom::IResult<&[u8], NewTokenFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<NewTokenFrame> for T {
     fn put_frame(&mut self, frame: &NewTokenFrame) {
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_varint(&VarInt::from_u32(frame.token.len() as u32));
         self.put_slice(&frame.token);
     }

@@ -1,5 +1,5 @@
 use super::EncodeSize;
-
+use crate::frame::{GetFrameType, io::WriteFrameType};
 /// HandshakeDone frame
 ///
 /// ```text
@@ -30,10 +30,7 @@ pub fn be_handshake_done_frame(input: &[u8]) -> nom::IResult<&[u8], HandshakeDon
 
 impl<T: bytes::BufMut> super::io::WriteFrame<HandshakeDoneFrame> for T {
     fn put_frame(&mut self, frame: &HandshakeDoneFrame) {
-        use crate::varint::WriteVarInt;
-        self.put_varint(&crate::varint::VarInt::from(
-            super::GetFrameType::frame_type(frame),
-        ));
+        self.put_frame_type(frame.frame_type());
     }
 }
 

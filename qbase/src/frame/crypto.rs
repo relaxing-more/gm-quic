@@ -3,6 +3,7 @@ use std::ops::Range;
 use nom::Parser;
 
 use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
     util::{ContinuousData, WriteData},
     varint::{VARINT_MAX, VarInt, WriteVarInt, be_varint},
 };
@@ -118,7 +119,7 @@ where
 {
     fn put_data_frame(&mut self, frame: &CryptoFrame, data: &D) {
         assert_eq!(frame.length.into_inner(), data.len() as u64);
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_varint(&frame.offset);
         self.put_varint(&frame.length);
         self.put_data(data);

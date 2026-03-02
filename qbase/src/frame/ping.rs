@@ -1,3 +1,4 @@
+use crate::frame::{GetFrameType, io::WriteFrameType};
 /// PING Frame.
 ///
 /// ```text
@@ -28,10 +29,7 @@ pub fn be_ping_frame(input: &[u8]) -> nom::IResult<&[u8], PingFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<PingFrame> for T {
     fn put_frame(&mut self, frame: &PingFrame) {
-        use crate::varint::WriteVarInt;
-        self.put_varint(&crate::varint::VarInt::from(
-            super::GetFrameType::frame_type(frame),
-        ));
+        self.put_frame_type(frame.frame_type());
     }
 }
 #[cfg(test)]

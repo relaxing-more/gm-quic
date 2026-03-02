@@ -1,4 +1,7 @@
-use crate::varint::{VarInt, WriteVarInt, be_varint};
+use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
+    varint::{VarInt, WriteVarInt, be_varint},
+};
 
 /// MAX_DATA Frame
 ///
@@ -53,7 +56,7 @@ pub fn be_max_data_frame(input: &[u8]) -> nom::IResult<&[u8], MaxDataFrame> {
 
 impl<T: bytes::BufMut> super::io::WriteFrame<MaxDataFrame> for T {
     fn put_frame(&mut self, frame: &MaxDataFrame) {
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_varint(&frame.max_data);
     }
 }

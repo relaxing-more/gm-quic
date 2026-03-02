@@ -1,4 +1,7 @@
-use crate::varint::{VarInt, WriteVarInt, be_varint};
+use crate::{
+    frame::{GetFrameType, io::WriteFrameType},
+    varint::{VarInt, WriteVarInt, be_varint},
+};
 
 /// RETIRE_CONNECTION_ID frame.
 ///
@@ -53,7 +56,7 @@ pub fn be_retire_connection_id_frame(input: &[u8]) -> nom::IResult<&[u8], Retire
 
 impl<T: bytes::BufMut> super::io::WriteFrame<RetireConnectionIdFrame> for T {
     fn put_frame(&mut self, frame: &RetireConnectionIdFrame) {
-        self.put_varint(&VarInt::from(super::GetFrameType::frame_type(frame)));
+        self.put_frame_type(frame.frame_type());
         self.put_varint(&frame.sequence);
     }
 }

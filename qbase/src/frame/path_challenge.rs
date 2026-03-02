@@ -1,5 +1,6 @@
 use derive_more::Deref;
 
+use crate::frame::{GetFrameType, io::WriteFrameType};
 /// PATH_CHALLENGE frame.
 ///
 /// ```text
@@ -59,10 +60,7 @@ pub fn be_path_challenge_frame(input: &[u8]) -> nom::IResult<&[u8], PathChalleng
 // BufMut write extension for PATH_CHALLENGE_FRAME
 impl<T: bytes::BufMut> super::io::WriteFrame<PathChallengeFrame> for T {
     fn put_frame(&mut self, frame: &PathChallengeFrame) {
-        use crate::varint::WriteVarInt;
-        self.put_varint(&crate::varint::VarInt::from(
-            super::GetFrameType::frame_type(frame),
-        ));
+        self.put_frame_type(frame.frame_type());
         self.put_slice(&frame.data);
     }
 }

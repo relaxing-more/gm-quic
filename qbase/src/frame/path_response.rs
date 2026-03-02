@@ -2,6 +2,7 @@ use std::ops::Deref;
 
 use derive_more::Deref;
 
+use crate::frame::{GetFrameType, io::WriteFrameType};
 /// PATH_RESPONSE Frame.
 ///
 /// ```text
@@ -59,10 +60,7 @@ pub fn be_path_response_frame(input: &[u8]) -> nom::IResult<&[u8], PathResponseF
 
 impl<T: bytes::BufMut> super::io::WriteFrame<PathResponseFrame> for T {
     fn put_frame(&mut self, frame: &PathResponseFrame) {
-        use crate::varint::WriteVarInt;
-        self.put_varint(&crate::varint::VarInt::from(
-            super::GetFrameType::frame_type(frame),
-        ));
+        self.put_frame_type(frame.frame_type());
         self.put_slice(&frame.data);
     }
 }
