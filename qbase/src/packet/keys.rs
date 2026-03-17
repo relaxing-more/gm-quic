@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, VecDeque},
     future::Future,
     ops::DerefMut,
     pin::Pin,
@@ -49,7 +50,7 @@ impl From<RustlsKeys> for Keys {
 }
 
 use super::KeyPhaseBit;
-use crate::role::Role;
+use crate::{error::{ErrorKind, QuicError}, role::Role};
 
 #[derive(Clone)]
 enum KeysState<K> {
@@ -287,64 +288,348 @@ impl ArcZeroRttKeys {
 ///
 /// See [key update](https://www.rfc-editor.org/rfc/rfc9001#name-key-update)
 /// of [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) for more details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GetKeyError {
+    Retired,
+    Unknown,
+}
+
+/// Entry in the 1-RTT key update window.
+/// Each entry represents a key generation with both send and receive keys.
+#[derive(Clone)]
+pub struct KeyEntry {
+    /// Generation counter (0, 1, 2, ...)
+    pub generation: u64,
+    /// Send key for outgoing packets
+    pub sk: Arc<dyn PacketKey>,
+    /// Receive key for incoming packets
+    pub rk: Arc<dyn PacketKey>,
+    /// Record received packet number range for this key generation
+    pub recv_pn_range: Option<(u64, u64)>,
+}
+
+impl KeyEntry {
+    fn new(generation: u64, sk: Arc<dyn PacketKey>, rk: Arc<dyn PacketKey>) -> Self {
+        Self {
+            generation,
+            sk,
+            rk,
+            recv_pn_range: None,
+        }
+    }
+
+    /// Update the received packet number range when a packet is successfully decrypted.
+    fn update_recv_pn(&mut self, pn: u64) {
+        match &mut self.recv_pn_range {
+            None => self.recv_pn_range = Some((pn, pn)),
+            Some((first, last)) => {
+                if pn < *first {
+                    *first = pn;
+                }
+                if pn > *last {
+                    *last = pn;
+                }
+            }
+        }
+    }
+}
+
 pub struct OneRttPacketKeys {
+    /// Key update counter, incremented on each update
+    counter: u64,
+    /// Ordered window of key entries (max 3 generations)
+    keys: VecDeque<KeyEntry>,
+    /// Secrets for derive next key pair
+    secrets: Option<Secrets>,
+    /// Current key phase bit
     cur_phase: KeyPhaseBit,
-    secrets: Secrets,
-    // TODO: 保存三个
-    remote: [Option<Arc<dyn PacketKey>>; 2],
-    local: Arc<dyn PacketKey>,
+    /// Sent packet number ranges for each generation (for ACK tracking)
+    sent_pk_ranges: HashMap<u64, (u64, u64)>,
+    /// Largest acknowledged packet number in 1-RTT space
+    largest_acked_pn: Option<u64>,
+    /// Map packet number to its generation
+    sent_pk_stage: HashMap<u64, u64>,
+    /// Count of unacked packets in each generation
+    outstanding_pk_count: HashMap<u64, usize>,
+    /// Consecutive decryption failures
+    contiguous_decrypt_failures: u32,
 }
 
 impl OneRttPacketKeys {
+    /// Maximum number of consecutive decryption failures before giving up
+    const MAX_CONTIGUOUS_DECRYPT_FAILURES: u32 = 3;
+
     /// Create new [`OneRttPacketKeys`].
     ///
     /// The TLS handshake session must exchange enough information to generate the 1-RTT keys.
     fn new(remote: Box<dyn PacketKey>, local: Box<dyn PacketKey>, secrets: Secrets) -> Self {
+        let sk: Arc<dyn PacketKey> = Arc::from(local);
+        let rk: Arc<dyn PacketKey> = Arc::from(remote);
+        
+        let mut keys = VecDeque::new();
+        let entry = KeyEntry::new(0, sk.clone(), rk);
+        keys.push_back(entry);
+
         Self {
+            counter: 0,
+            keys,
+            secrets: Some(secrets),
             cur_phase: KeyPhaseBit::default(),
-            secrets,
-            remote: [Some(Arc::from(remote)), None],
-            local: Arc::from(local),
+            sent_pk_ranges: HashMap::new(),
+            largest_acked_pn: None,
+            sent_pk_stage: HashMap::new(),
+            outstanding_pk_count: HashMap::new(),
+            contiguous_decrypt_failures: 0,
         }
     }
 
-    /// Proactively update the 1-RTT packet key locally.
-    /// Or be informed by the peer to update the key.
+    /// Get the local key for encrypting outgoing packets.
     ///
-    /// The key phase bit will be toggled and sent to the peer,
-    /// informing the peer to update the key to next 1-RTT packet key too.
-    pub fn update(&mut self) {
+    /// Returns (generation, key_phase, packet_key).
+    pub fn get_local_key(&self) -> (u64, KeyPhaseBit, Arc<dyn PacketKey>) {
+        let entry = self.keys.back().expect("keys should not be empty");
+        (entry.generation, self.cur_phase, entry.sk.clone())
+    }
+
+    /// Get the remote key for decrypting a received packet.
+    ///
+    /// Determines which key generation should be used based on received packet number
+    /// and key phase bit. Returns (generation, key) if found.
+    pub fn get_remote_key(&self, rcvd_pn: u64, key_phase: KeyPhaseBit) -> Result<(u64, Option<Arc<dyn PacketKey>>), &'static str> {
+        // First, try to find by received pn range
+        for entry in self.keys.iter() {
+            if let Some((first_pn, last_pn)) = entry.recv_pn_range {
+                if rcvd_pn >= first_pn && rcvd_pn <= last_pn {
+                    let expected_phase = if entry.generation % 2 == 0 {
+                        KeyPhaseBit::Zero
+                    } else {
+                        KeyPhaseBit::One
+                    };
+                    if key_phase == expected_phase {
+                        return Ok((entry.generation, Some(entry.rk.clone())));
+                    }
+                }
+            }
+        }
+
+        // Fallback: use candidate generations based on key_phase
+        let candidates = self.candidate_generations(key_phase);
+        for generation in candidates.into_iter().flatten() {
+            if let Some(entry) = self.keys.iter().find(|e| e.generation == generation) {
+                return Ok((entry.generation, Some(entry.rk.clone())));
+            }
+        }
+
+        Err("no suitable key found")
+    }
+
+    /// Get candidate generations based on key phase bit.
+    fn candidate_generations(&self, key_phase: KeyPhaseBit) -> [Option<u64>; 2] {
+        if let Some(latest) = self.keys.back().map(|e| e.generation) {
+            if key_phase == self.cur_phase {
+                [Some(latest), latest.checked_sub(2)]
+            } else {
+                [latest.checked_sub(1), latest.checked_add(1)]
+            }
+        } else {
+            [None, None]
+        }
+    }
+
+    /// Called when a packet is successfully decrypted with key of generation i.
+    ///
+    /// This marks the generation as confirmed by received data and updates the pn range.
+    fn decrypted_packet(&mut self, rcvd_pn: u64, generation: u64) -> Result<(), QuicError> {
+        let max_newer_pn = self
+            .keys
+            .iter()
+            .filter(|entry| entry.generation > generation)
+            .filter_map(|entry| entry.recv_pn_range.map(|(_, last)| last))
+            .max();
+
+        if let Some(max_newer_pn) = max_newer_pn
+            && rcvd_pn > max_newer_pn
+        {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::KeyUpdate,
+                "key downgrade detected: higher packet number decrypted with old key",
+            ));
+        }
+
+        for entry in self.keys.iter_mut() {
+            if entry.generation == generation {
+                entry.update_recv_pn(rcvd_pn);
+                break;
+            }
+        }
+        
+        self.contiguous_decrypt_failures = 0;
+        Ok(())
+    }
+
+    /// Called when packet decryption fails with key of generation i.
+    ///
+    /// Returns true if we should give up (threshold exceeded), false otherwise.
+    fn decrypted_failed(&mut self, _rcvd_pn: u64, _generation: u64) -> bool {
+        self.contiguous_decrypt_failures += 1;
+        self.contiguous_decrypt_failures > Self::MAX_CONTIGUOUS_DECRYPT_FAILURES
+    }
+
+    /// Proactively update keys (active = true) or passively (active = false).
+    ///
+    /// When updating:
+    /// - Derive next key pair from secrets
+    /// - Add new KeyEntry to keys window
+    /// - Toggle key_phase bit
+    /// - Old keys may be retired if window size exceeds limit
+    pub fn update(&mut self, active: bool) {
+        if active {
+            let latest_gen = self.keys.back().map(|e| e.generation).unwrap_or(0);
+            let Some((min_sent_pn, _)) = self.sent_pk_ranges.get(&latest_gen).copied() else {
+                return;
+            };
+
+            let Some(largest_acked) = self.largest_acked_pn else {
+                return;
+            };
+
+            if largest_acked < min_sent_pn {
+                return;
+            }
+        }
+
+        let key_set = self
+            .secrets
+            .as_mut()
+            .expect("1-RTT secrets must exist when updating keys")
+            .next_packet_keys();
+        self.counter += 1;
+
+        let entry = KeyEntry::new(
+            self.counter,
+            Arc::from(key_set.local),
+            Arc::from(key_set.remote),
+        );
+
+        self.keys.push_back(entry);
+        while self.keys.len() > 3 {
+            self.keys.pop_front();
+        }
+
         self.cur_phase.toggle();
-        let key_set = self.secrets.next_packet_keys();
-        self.remote[self.cur_phase.as_index()] = Some(Arc::from(key_set.remote));
-        self.local = Arc::from(key_set.local);
     }
 
-    /// Old key must be phased out within a certain period of time.
+    /// Validate ACK: mark packets as acknowledged and confirm key acks.
     ///
-    /// If the old one don't go, the new ones won't come.
-    /// If it is not phased out, it will be considered as new keys and
-    /// fail to decrypt the packet in future.
-    pub fn phase_out(&mut self) {
-        self.remote[(!self.cur_phase).as_index()].take();
-    }
+    /// When a packet in generation i is acked, we know the peer has received
+    /// a packet encrypted with key i, confirming the key update.
+    pub fn validate_ack(
+        &mut self,
+        pn: u64,
+        largest_ack: u64,
+        rcvd_generation: Option<u64>,
+    ) -> Result<(), QuicError> {
+        self.largest_acked_pn = Some(
+            self.largest_acked_pn
+                .map_or(largest_ack, |cur| cur.max(largest_ack)),
+        );
 
-    /// Get the remote key to decrypt the incoming 1-RTT packet.
-    /// If the key phase is not the current key phase, update the key, see [`Self::update`].
-    ///
-    /// Return `Arc<PacketKey>` to decrypt the incoming 1-RTT packet.
-    pub fn get_remote(&mut self, key_phase: KeyPhaseBit, _pn: u64) -> Arc<dyn PacketKey> {
-        if key_phase != self.cur_phase && self.remote[key_phase.as_index()].is_none() {
-            self.update();
+        let Some(stage) = self.sent_pk_stage.remove(&pn) else {
+            return Ok(());
+        };
+
+        if let Some(rcvd_generation) = rcvd_generation
+            && stage > rcvd_generation
+        {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::KeyUpdate,
+                "peer acknowledged new-key packet with older key phase",
+            ));
         }
-        self.remote[key_phase.as_index()].clone().unwrap()
+
+        let Some(count) = self.outstanding_pk_count.get_mut(&stage) else {
+            return Ok(());
+        };
+
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            self.outstanding_pk_count.remove(&stage);
+        }
+        Ok(())
     }
 
-    /// Get the local current key to encrypt the outgoing packet.
-    ///
-    /// Return `Arc<PacketKey>` to encrypt the outgoing 1-RTT packet.
-    pub fn get_local(&self) -> (KeyPhaseBit, Arc<dyn PacketKey>) {
-        (self.cur_phase, self.local.clone())
+    /// Record sent packet number for key update tracking
+    pub fn record_sent_pk(&mut self, generation: u64, pn: u64) {
+        let entry = self
+            .sent_pk_ranges
+            .entry(generation)
+            .or_insert((pn, pn));
+        entry.0 = entry.0.min(pn);
+        entry.1 = entry.1.max(pn);
+
+        if let Some(old_stage) = self.sent_pk_stage.insert(pn, generation)
+            && let Some(count) = self.outstanding_pk_count.get_mut(&old_stage)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.outstanding_pk_count.remove(&old_stage);
+            }
+        }
+
+        *self.outstanding_pk_count.entry(generation).or_default() += 1;
+    }
+
+    /// Iterate through available key entries
+    pub fn iter(&self) -> impl Iterator<Item = &KeyEntry> {
+        self.keys.iter()
+    }
+
+    /// Get remote key candidates  based on key phase
+    pub fn remote_key_candidates(&self, key_phase: KeyPhaseBit) -> [Option<u64>; 2] {
+        self.candidate_generations(key_phase)
+    }
+
+    /// Get the password key for a specific generation
+    pub fn key(&self, generation: u64) -> Result<Option<Arc<dyn PacketKey>>, GetKeyError> {
+        for entry in self.keys.iter() {
+            if entry.generation == generation {
+                return Ok(Some(entry.rk.clone()));
+            }
+        }
+
+        if let Some(latest) = self.keys.back().map(|e| e.generation) {
+            if generation == latest + 1 {
+                return Ok(None);
+            }
+        }
+
+        Err(GetKeyError::Unknown)
+    }
+
+    /// Passive update in response to peer-initiated key phase change
+    pub fn update_by_peer(&mut self) -> Result<(), QuicError> {
+        if let Some(latest) = self.keys.back()
+            && latest.recv_pn_range.is_none()
+            && latest.generation > 0
+        {
+            return Err(QuicError::with_default_fty(
+                ErrorKind::KeyUpdate,
+                "received consecutive peer key updates before confirming prior update",
+            ));
+        }
+
+        self.update(false);
+        Ok(())
+    }
+
+    /// Record successful decryption
+    pub fn on_pk_decrypted_success(&mut self, generation: u64, pn: u64) -> Result<(), QuicError> {
+        self.decrypted_packet(pn, generation)
+    }
+
+    /// Record decryption failure
+    pub fn on_pk_decrypt_failed(&mut self) -> bool {
+        self.decrypted_failed(0, 0)
     }
 }
 
@@ -522,3 +807,111 @@ impl Future for GetRemoteOneRttKeys<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustls::{Error as RustlsError, quic::Tag};
+
+    struct DummyPacketKey;
+
+    impl PacketKey for DummyPacketKey {
+        fn encrypt_in_place(
+            &self,
+            _packet_number: u64,
+            _header: &[u8],
+            _payload: &mut [u8],
+        ) -> Result<Tag, RustlsError> {
+            Err(RustlsError::General("dummy key".into()))
+        }
+
+        fn decrypt_in_place<'a>(
+            &self,
+            _packet_number: u64,
+            _header: &[u8],
+            _payload: &'a mut [u8],
+        ) -> Result<&'a [u8], RustlsError> {
+            Err(RustlsError::General("dummy key".into()))
+        }
+
+        fn tag_len(&self) -> usize {
+            16
+        }
+
+        fn confidentiality_limit(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn integrity_limit(&self) -> u64 {
+            u64::MAX
+        }
+    }
+
+    fn dummy_pk() -> Arc<dyn PacketKey> {
+        Arc::new(DummyPacketKey)
+    }
+
+    fn test_keys_with_entries(entries: VecDeque<KeyEntry>) -> OneRttPacketKeys {
+        OneRttPacketKeys {
+            counter: entries.back().map(|e| e.generation).unwrap_or(0),
+            keys: entries,
+            secrets: None,
+            cur_phase: KeyPhaseBit::Zero,
+            sent_pk_ranges: HashMap::new(),
+            largest_acked_pn: None,
+            sent_pk_stage: HashMap::new(),
+            outstanding_pk_count: HashMap::new(),
+            contiguous_decrypt_failures: 0,
+        }
+    }
+
+    #[test]
+    fn key_update_error_on_consecutive_peer_updates_before_confirming_first() {
+        let mut entries = VecDeque::new();
+        let mut e0 = KeyEntry::new(0, dummy_pk(), dummy_pk());
+        e0.recv_pn_range = Some((1, 10));
+        entries.push_back(e0);
+
+        let mut e1 = KeyEntry::new(1, dummy_pk(), dummy_pk());
+        e1.recv_pn_range = None;
+        entries.push_back(e1);
+
+        let mut keys = test_keys_with_entries(entries);
+        let err = keys.update_by_peer().expect_err("must reject detect consecutive peer key update");
+        assert_eq!(err.kind(), ErrorKind::KeyUpdate);
+    }
+
+    #[test]
+    fn key_update_error_on_peer_unsynced_ack_using_old_key_phase() {
+        let mut entries = VecDeque::new();
+        entries.push_back(KeyEntry::new(0, dummy_pk(), dummy_pk()));
+        entries.push_back(KeyEntry::new(1, dummy_pk(), dummy_pk()));
+        let mut keys = test_keys_with_entries(entries);
+
+        keys.sent_pk_stage.insert(42, 1);
+
+        let err = keys
+            .validate_ack(42, 42, Some(0))
+            .expect_err("must reject old-key ACKing new-key packet");
+        assert_eq!(err.kind(), ErrorKind::KeyUpdate);
+    }
+
+    #[test]
+    fn key_update_error_on_key_downgrade_high_pn_decrypted_with_old_key() {
+        let mut entries = VecDeque::new();
+        let mut e0 = KeyEntry::new(0, dummy_pk(), dummy_pk());
+        e0.recv_pn_range = Some((1, 50));
+        entries.push_back(e0);
+
+        let mut e1 = KeyEntry::new(1, dummy_pk(), dummy_pk());
+        e1.recv_pn_range = Some((100, 120));
+        entries.push_back(e1);
+
+        let mut keys = test_keys_with_entries(entries);
+        let err = keys
+            .decrypted_packet(130, 0)
+            .expect_err("must reject decrypting higher PN with old key");
+        assert_eq!(err.kind(), ErrorKind::KeyUpdate);
+    }
+}
+
