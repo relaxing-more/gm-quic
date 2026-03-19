@@ -158,6 +158,7 @@ where
             undecoded_pn,
             decoded_pn,
             body_len: body_length,
+            key_generation: None,
         }))
     }
 
@@ -187,24 +188,165 @@ where
                 return None;
             }
         };
-        let pk = pk.lock_guard().get_remote(key_phase, decoded_pn);
         let body_offset = self.payload_offset + undecoded_pn.size();
-        let body_length = match decrypt_packet(pk.as_ref(), decoded_pn, pkt_buf, body_offset) {
-            Ok(body_length) => body_length,
-            Err(error) => {
-                self.drop_on_decryption_failure(error, decoded_pn);
-                return None;
+
+        // Try to get the appropriate key for this packet using pn + key_phase
+        let (generation, key_opt) = {
+            let keys = pk.lock_guard();
+            match keys.get_remote_key(decoded_pn, key_phase) {
+                Ok((generation, key)) => (Some(generation), key),
+                Err(_) => (None, None),
             }
         };
 
-        Some(Ok(PlainPacket {
-            header: self.header,
-            plain: self.payload.freeze(),
-            payload_offset: self.payload_offset,
-            undecoded_pn,
+        // Try decryption with the determined key
+        if let Some(key) = key_opt {
+            match decrypt_packet(key.as_ref(), decoded_pn, pkt_buf, body_offset) {
+                Ok(body_length) => {
+                    // Success: update recv_pk_ranges and return
+                    if let Some(generation_val) = generation {
+                        let mut keys = pk.lock_guard();
+                        if let Err(e) = keys.on_pk_decrypted_success(generation_val, decoded_pn) {
+                            return Some(Err(e));
+                        }
+                    }
+                    return Some(Ok(PlainPacket {
+                        header: self.header,
+                        plain: self.payload.freeze(),
+                        payload_offset: self.payload_offset,
+                        undecoded_pn,
+                        decoded_pn,
+                        body_len: body_length,
+                        key_generation: generation,
+                    }));
+                }
+                Err(_) => {
+                    // Record failure but continue to try alternatives
+                    let should_abort = {
+                        let mut keys = pk.lock_guard();
+                        keys.on_pk_decrypt_failed()
+                    };
+
+                    if should_abort {
+                        self.drop_on_decryption_failure(
+                            qbase::packet::error::Error::DecryptPacketFailure,
+                            decoded_pn,
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Fallback: if key was None or decryption failed, try candidate generations
+        let (candidates, next_generation) = {
+            let keys = pk.lock_guard();
+            let mut candidates = Vec::with_capacity(2);
+            let mut next_generation = None;
+
+            for generation in keys.remote_key_candidates(key_phase).into_iter().flatten() {
+                match keys.key(generation) {
+                    Ok(Some(key)) => candidates.push((generation, key)),
+                    Ok(None) => next_generation = Some(generation),
+                    Err(_) => {}
+                }
+            }
+
+            (candidates, next_generation)
+        };
+
+        for (generation, key) in candidates {
+            match decrypt_packet(key.as_ref(), decoded_pn, pkt_buf, body_offset) {
+                Ok(body_length) => {
+                    // Success: update recv_pk_ranges
+                    let mut keys = pk.lock_guard();
+                    if let Err(e) = keys.on_pk_decrypted_success(generation, decoded_pn) {
+                        return Some(Err(e));
+                    }
+                    drop(keys);
+
+                    return Some(Ok(PlainPacket {
+                        header: self.header,
+                        plain: self.payload.freeze(),
+                        payload_offset: self.payload_offset,
+                        undecoded_pn,
+                        decoded_pn,
+                        body_len: body_length,
+                        key_generation: Some(generation),
+                    }));
+                }
+                Err(_) => {
+                    let should_abort = {
+                        let mut keys = pk.lock_guard();
+                        keys.on_pk_decrypt_failed()
+                    };
+
+                    if should_abort {
+                        self.drop_on_decryption_failure(
+                            qbase::packet::error::Error::DecryptPacketFailure,
+                            decoded_pn,
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Try the next generation if needed
+        if let Some(generation) = next_generation {
+            let next_key = {
+                let mut keys = pk.lock_guard();
+                if matches!(keys.key(generation), Ok(None))
+                    && let Err(e) = keys.update_by_peer()
+                {
+                    return Some(Err(e));
+                }
+                keys.key(generation).ok().flatten()
+            };
+
+            if let Some(key) = next_key {
+                match decrypt_packet(key.as_ref(), decoded_pn, pkt_buf, body_offset) {
+                    Ok(body_length) => {
+                        let mut keys = pk.lock_guard();
+                        if let Err(e) = keys.on_pk_decrypted_success(generation, decoded_pn) {
+                            return Some(Err(e));
+                        }
+                        drop(keys);
+
+                        return Some(Ok(PlainPacket {
+                            header: self.header,
+                            plain: self.payload.freeze(),
+                            payload_offset: self.payload_offset,
+                            undecoded_pn,
+                            decoded_pn,
+                            body_len: body_length,
+                            key_generation: Some(generation),
+                        }));
+                    }
+                    Err(_) => {
+                        let should_abort = {
+                            let mut keys = pk.lock_guard();
+                            keys.on_pk_decrypt_failed()
+                        };
+
+                        if should_abort {
+                            self.drop_on_decryption_failure(
+                                qbase::packet::error::Error::DecryptPacketFailure,
+                                decoded_pn,
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // All decryption attempts failed
+        self.drop_on_decryption_failure(
+            qbase::packet::error::Error::DecryptPacketFailure,
             decoded_pn,
-            body_len: body_length,
-        }))
+        );
+        None
     }
 }
 
@@ -232,6 +374,7 @@ pub struct PlainPacket<H> {
     plain: Bytes,
     payload_offset: usize,
     body_len: usize,
+    key_generation: Option<u64>,
 }
 
 impl<H> PlainPacket<H> {
@@ -245,6 +388,10 @@ impl<H> PlainPacket<H> {
 
     pub fn payload_len(&self) -> usize {
         self.undecoded_pn.size() + self.body_len
+    }
+
+    pub fn key_generation(&self) -> Option<u64> {
+        self.key_generation
     }
 
     pub fn body(&self) -> Bytes {

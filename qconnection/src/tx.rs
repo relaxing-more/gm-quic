@@ -6,7 +6,7 @@ use qbase::{
     packet::{
         AssemblePacket, PacketProperties, PacketWriter as BasePacketWriter, RecordFrame,
         header::{EncodeHeader, GetType, io::WriteHeader, long::LongHeader, short::OneRttHeader},
-        keys::DirectionalKeys,
+        keys::{ArcOneRttPacketKeys, DirectionalKeys},
         signal::KeyPhaseBit,
     },
     util::ContinuousData,
@@ -21,8 +21,20 @@ pub struct PacketWriter<'b, 's, F> {
     writer: QEventPacketWriter<'b>,
     // 不同空间的send guard类型不一样
     clerk: NewPacketGuard<'s, F>,
+    one_rtt_sent_record: Option<(ArcOneRttPacketKeys, u64, u64)>,
     retran_timeout: Duration,
     expire_timeout: Duration,
+}
+
+pub struct PacketTimeouts {
+    pub retran_timeout: Duration,
+    pub expire_timeout: Duration,
+}
+
+pub struct OneRttPacketMeta {
+    pub key_phase: KeyPhaseBit,
+    pub key_update_count: u64,
+    pub pk_keys: ArcOneRttPacketKeys,
 }
 
 impl<'b, F> AsRef<BasePacketWriter<'b>> for PacketWriter<'b, '_, F> {
@@ -58,6 +70,7 @@ impl<'b, 's, F> PacketWriter<'b, 's, F> {
         Ok(Self {
             clerk,
             writer: QEventPacketWriter::new_long(&header, buffer, pn, keys)?,
+            one_rtt_sent_record: None,
             expire_timeout,
             retran_timeout,
         })
@@ -67,18 +80,24 @@ impl<'b, 's, F> PacketWriter<'b, 's, F> {
         header: OneRttHeader,
         buffer: &'b mut [u8],
         keys: DirectionalKeys,
-        key_phase: KeyPhaseBit,
         journal: &'s ArcSentJournal<F>,
-        retran_timeout: Duration,
-        expire_timeout: Duration,
+        one_rtt: OneRttPacketMeta,
+        timeouts: PacketTimeouts,
     ) -> Result<Self, Signals> {
+        let OneRttPacketMeta {
+            key_phase,
+            key_update_count,
+            pk_keys,
+        } = one_rtt;
         let clerk = journal.new_packet();
         let pn = clerk.pn();
+        let actual_pn = pn.0;
         Ok(Self {
             clerk,
             writer: QEventPacketWriter::new_short(&header, buffer, pn, keys, key_phase)?,
-            expire_timeout,
-            retran_timeout,
+            one_rtt_sent_record: Some((pk_keys, key_update_count, actual_pn)),
+            expire_timeout: timeouts.expire_timeout,
+            retran_timeout: timeouts.retran_timeout,
         })
     }
 }
@@ -109,6 +128,9 @@ unsafe impl<'b, 's, F> BufMut for PacketWriter<'b, 's, F> {
 impl<F> AssemblePacket for PacketWriter<'_, '_, F> {
     #[inline]
     fn encrypt_and_protect_packet(self) -> (usize, PacketProperties) {
+        if let Some((pk_keys, key_update_count, pn)) = &self.one_rtt_sent_record {
+            pk_keys.lock_guard().record_sent_pk(*key_update_count, *pn);
+        }
         self.clerk
             .build_with_time(self.retran_timeout, self.expire_timeout);
         self.writer.encrypt_and_protect_packet()
@@ -138,6 +160,7 @@ pub struct TrivialPacketWriter<'b, 's, F> {
     writer: QEventPacketWriter<'b>,
     // 不同空间的send guard类型不一样
     clerk: NewPacketGuard<'s, F>,
+    one_rtt_sent_record: Option<(ArcOneRttPacketKeys, u64, u64)>,
 }
 
 impl<'b, F> AsRef<BasePacketWriter<'b>> for TrivialPacketWriter<'b, '_, F> {
@@ -172,6 +195,7 @@ impl<'b, 's, F> TrivialPacketWriter<'b, 's, F> {
         Ok(Self {
             clerk,
             writer: QEventPacketWriter::new_long(&header, buffer, pn, keys)?,
+            one_rtt_sent_record: None,
         })
     }
 
@@ -181,13 +205,17 @@ impl<'b, 's, F> TrivialPacketWriter<'b, 's, F> {
         buffer: &'b mut [u8],
         keys: DirectionalKeys,
         key_phase: KeyPhaseBit,
+        key_update_count: u64,
+        pk_keys: ArcOneRttPacketKeys,
         journal: &'s ArcSentJournal<F>,
     ) -> Result<Self, Signals> {
         let clerk = journal.new_packet();
         let pn = clerk.pn();
+        let actual_pn = pn.0;
         Ok(Self {
             clerk,
             writer: QEventPacketWriter::new_short(&header, buffer, pn, keys, key_phase)?,
+            one_rtt_sent_record: Some((pk_keys, key_update_count, actual_pn)),
         })
     }
 }
@@ -218,6 +246,9 @@ unsafe impl<'b, 's, F> BufMut for TrivialPacketWriter<'b, 's, F> {
 impl<F> AssemblePacket for TrivialPacketWriter<'_, '_, F> {
     #[inline]
     fn encrypt_and_protect_packet(self) -> (usize, PacketProperties) {
+        if let Some((pk_keys, key_update_count, pn)) = &self.one_rtt_sent_record {
+            pk_keys.lock_guard().record_sent_pk(*key_update_count, *pn);
+        }
         self.clerk.build_trivial();
         self.writer.encrypt_and_protect_packet()
     }
